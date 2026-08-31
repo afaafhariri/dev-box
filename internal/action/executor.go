@@ -14,6 +14,14 @@ import (
 // as fast as it renders, so this only has to absorb bursts.
 const outputBuffer = 64
 
+// Scanner limits for reading action output. The initial buffer stays small
+// because almost every line is short; the cap is what a pathological line is
+// allowed to reach before the read is failed rather than silently truncated.
+const (
+	initialScanBuffer = 64 * 1024
+	maxScanLine       = 4 * 1024 * 1024
+)
+
 // commandTimeout bounds a single action. Actions start and stop services, which
 // should be quick; anything slower has hung.
 const commandTimeout = 60 * time.Second
@@ -48,14 +56,26 @@ func stream(ctx context.Context, ch chan<- string, name string, args ...string) 
 	// Read on a goroutine so a cancelled context can return while the pipe
 	// drains behind us.
 	var wg sync.WaitGroup
+	var scanErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+
 		scanner := bufio.NewScanner(pipe)
+		// A single line can be far longer than the 64KB default: a download
+		// progress bar redraws with carriage returns rather than newlines, so
+		// the whole of it arrives as one line.
+		scanner.Buffer(make([]byte, 0, initialScanBuffer), maxScanLine)
+
 		for scanner.Scan() {
 			send(ctx, ch, scanner.Text())
 		}
+		// Scan reports false for a read failure exactly as it does for EOF.
+		// Without this check, truncated output would be indistinguishable
+		// from complete output, and the action would still claim success.
+		scanErr = scanner.Err()
 	}()
+	// Wait also publishes scanErr to this goroutine.
 	wg.Wait()
 
 	if err := cmd.Wait(); err != nil {
@@ -63,6 +83,9 @@ func stream(ctx context.Context, ch chan<- string, name string, args ...string) 
 			return fmt.Errorf("%s: %w", name, ctx.Err())
 		}
 		return fmt.Errorf("%s: %w", name, err)
+	}
+	if scanErr != nil {
+		return fmt.Errorf("reading %s output: %w", name, scanErr)
 	}
 	return nil
 }

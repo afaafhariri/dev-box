@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -318,5 +319,44 @@ func TestUnmanagedServiceFailsCleanly(t *testing.T) {
 
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], "✗") {
 		t.Errorf("lines = %v, want a single failure line", lines)
+	}
+}
+
+func TestLongLinesAreNotTruncated(t *testing.T) {
+	// A download progress bar redraws with carriage returns, so it reaches us
+	// as one line far past bufio's 64KB default.
+	const size = 300 * 1024
+	lines := Drain(run(context.Background(), "done", "sh", "-c",
+		fmt.Sprintf("printf '%%0.sx' $(seq 1 %d); echo", size)))
+
+	var longest int
+	for _, line := range lines {
+		if len(line) > longest {
+			longest = len(line)
+		}
+	}
+	if longest < size {
+		t.Errorf("longest line was %d bytes, want the full %d — output was truncated", longest, size)
+	}
+	if last := lines[len(lines)-1]; last != "✓ done" {
+		t.Errorf("last line = %q, want success", last)
+	}
+}
+
+func TestAnUnreadableStreamIsReportedNotSilentlyTruncated(t *testing.T) {
+	// Past the cap the read fails. Reporting success over truncated output
+	// would be worse than reporting the failure.
+	lines := Drain(run(context.Background(), "done", "sh", "-c",
+		fmt.Sprintf("printf '%%0.sx' $(seq 1 %d); echo", maxScanLine+1024)))
+
+	last := lines[len(lines)-1]
+	if last == "✓ done" {
+		t.Fatal("a truncated stream reported success")
+	}
+	if !strings.HasPrefix(last, "✗") {
+		t.Errorf("last line = %q, want a failure marker", last)
+	}
+	if !strings.Contains(last, "too long") {
+		t.Errorf("last line = %q, want the reason named", last)
 	}
 }
