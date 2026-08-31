@@ -175,7 +175,82 @@ func TestNodeNotInstalled(t *testing.T) {
 }
 
 func TestAllReturnsEveryLanguageDetector(t *testing.T) {
-	if got, want := len(All(&probe.Fake{})), 3; got != want {
-		t.Errorf("All() returned %d detectors, want %d", got, want)
+	want := map[string]bool{
+		"Go": true, "Python": true, "Node.js": true,
+		"Java": true, "Rust": true, "Ruby": true,
+	}
+
+	got := make(map[string]bool)
+	for _, d := range All(&probe.Fake{}) {
+		got[d.Name()] = true
+		if d.Category() != detector.CategoryLanguage {
+			t.Errorf("%s has category %q, want language", d.Name(), d.Category())
+		}
+	}
+
+	for name := range want {
+		if !got[name] {
+			t.Errorf("All() is missing the %s detector", name)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("All() returned %d detectors, want %d: %v", len(got), len(want), got)
+	}
+}
+
+func TestJavaReportsVersionFromStderr(t *testing.T) {
+	// java writes -version to stderr; the probe merges the streams so the
+	// detector sees it.
+	p := &probe.Fake{
+		Paths: map[string]string{"java": "/usr/bin/java"},
+		Commands: map[string]probe.FakeResult{
+			"java -version": {Out: `openjdk version "21.0.3" 2024-04-16
+OpenJDK Runtime Environment Homebrew (build 21.0.3)
+`},
+		},
+	}
+
+	item, err := All(p)[3].Detect(context.Background())
+	if err != nil {
+		t.Fatalf("Detect() error = %v", err)
+	}
+	if item.Version != "21.0.3" {
+		t.Errorf("Version = %q, want 21.0.3", item.Version)
+	}
+}
+
+func TestRustIncludesItsToolchain(t *testing.T) {
+	p := &probe.Fake{
+		Paths: map[string]string{"rustc": "/Users/x/.cargo/bin/rustc", "rustup": "/Users/x/.cargo/bin/rustup"},
+		Commands: map[string]probe.FakeResult{
+			"rustc --version":              {Out: "rustc 1.79.0 (129f3b996 2024-06-10)\n"},
+			"rustup show active-toolchain": {Out: "stable-aarch64-apple-darwin (default)\n"},
+		},
+	}
+
+	item, err := NewRust(p).Detect(context.Background())
+	if err != nil {
+		t.Fatalf("Detect() error = %v", err)
+	}
+	if item.Version != "1.79.0" {
+		t.Errorf("Version = %q, want 1.79.0", item.Version)
+	}
+	if got := item.Meta["toolchain"]; got != "stable-aarch64-apple-darwin (default)" {
+		t.Errorf("Meta[toolchain] = %q", got)
+	}
+}
+
+func TestRustWithoutRustupIsStillDetected(t *testing.T) {
+	p := &probe.Fake{
+		Paths:    map[string]string{"rustc": "/usr/local/bin/rustc"},
+		Commands: map[string]probe.FakeResult{"rustc --version": {Out: "rustc 1.79.0 (129f3b996 2024-06-10)"}},
+	}
+
+	item, err := NewRust(p).Detect(context.Background())
+	if err != nil {
+		t.Fatalf("Detect() error = %v", err)
+	}
+	if _, ok := item.Meta["toolchain"]; ok {
+		t.Error("Meta[toolchain] set with no rustup installed")
 	}
 }

@@ -9,5 +9,9 @@ import (
 func All(p probe.Prober) []detector.Detector {
 	return []detector.Detector{
 		NewOllama(p),
+		NewCUDA(p),
+		NewPyPackage(p, "PyTorch", "torch"),
+		NewPyPackage(p, "TensorFlow", "tensorflow"),
+		NewPyPackage(p, "Hugging Face", "transformers"),
 	}
 }

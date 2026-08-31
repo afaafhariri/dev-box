@@ -2,6 +2,7 @@ package languages
 
 import (
 	"devenv/internal/detector"
+	"devenv/internal/detectors/simple"
 	"devenv/internal/probe"
 )
 
@@ -11,16 +12,14 @@ func All(p probe.Prober) []detector.Detector {
 		NewGo(p),
 		NewPython(p),
 		NewNode(p),
+		NewJava(p),
+		NewRust(p),
+		NewRuby(p),
 	}
 }
 
-// firstBinary returns the first of names that resolves on PATH. It reports
-// ErrNotInstalled when none do.
+// firstBinary is the shared PATH lookup, re-exported here so the bespoke
+// detectors in this package read the same as the simple ones.
 func firstBinary(p probe.Prober, names []string) (bin, path string, err error) {
-	for _, name := range names {
-		if path, err := p.LookPath(name); err == nil {
-			return name, path, nil
-		}
-	}
-	return "", "", detector.ErrNotInstalled
+	return simple.FirstBinary(p, names)
 }

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"devenv/internal/app"
 )
@@ -34,7 +33,9 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		asJSON      = fs.Bool("json", false, "print one scan as JSON and exit, instead of starting the TUI")
 		listOnly    = fs.Bool("list", false, "list the registered detectors and exit")
 		showVersion = fs.Bool("version", false, "print the devenv version and exit")
-		timeout     = fs.Duration("timeout", 5*time.Second, "per-command timeout for a single detector probe")
+		timeout     = fs.Duration("timeout", 0, "per-command timeout for a single detector probe (overrides the config file)")
+		configPath  = fs.String("config", "", "path to the config file (default ~/.config/devenv/config.toml)")
+		noCache     = fs.Bool("no-cache", false, "ignore the disk cache for this run")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -49,9 +50,16 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	opts := app.DefaultOptions()
 	opts.JSON = *asJSON
 	opts.Timeout = *timeout
+	opts.ConfigPath = *configPath
+	opts.NoCache = *noCache
 	opts.Out = out
 
-	a := app.New(opts)
+	// A broken config file is reported, but the app still runs on defaults: a
+	// typo should not lock anyone out of their own tool.
+	a, err := app.New(opts)
+	if err != nil {
+		fmt.Fprintln(errOut, "devenv:", err)
+	}
 
 	if *listOnly {
 		for _, name := range a.Detectors() {

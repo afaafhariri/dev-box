@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"devenv/internal/detector"
 )
@@ -25,6 +26,10 @@ type Store struct {
 	// dropped counts notifications shed because a subscriber was not
 	// draining. Exposed via Dropped for diagnostics.
 	dropped int
+
+	// primedAt records when the cached snapshot the store started from was
+	// taken. Zero means the store started empty.
+	primedAt time.Time
 }
 
 // New returns an empty store.
@@ -59,6 +64,31 @@ func (s *Store) Set(item detector.Item) {
 			s.mu.Unlock()
 		}
 	}
+}
+
+// Prime fills the store from a cached snapshot. It is called before the TUI
+// subscribes, so no notifications are sent: the first render reads the store
+// directly.
+func (s *Store) Prime(snap Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
+	for _, item := range snap.Items {
+		s.items[item.Name] = item
+	}
+	s.primedAt = snap.CachedAt
+}
+
+// PrimedAt is when the cached snapshot the store started from was taken, or
+// the zero time if the store started empty.
+func (s *Store) PrimedAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.primedAt
 }
 
 // Get returns one item by name.
