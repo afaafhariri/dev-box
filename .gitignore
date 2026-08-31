@@ -1,0 +1,56 @@
+# Compiled binary — `go build` in the project root drops it here under the
+# module name.
+/devenv
+/dist/
+/bin/
+
+# Go build and test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage output
+coverage.txt
+coverage.html
+*.cover
+*.coverprofile
+
+# Go workspace files — machine-local, should never be shared
+go.work
+go.work.sum
+
+# Dependency vendoring is not used here; uncomment if that changes
+# /vendor/
+
+# CPU/memory profiles from `go test -cpuprofile` etc.
+*.prof
+*.pprof
+
+# Local environment overrides
+.env
+.env.local
+
+# devenv's own on-disk cache, should it ever be written inside the repo
+# during development rather than to ~/.config/devenv
+/cache.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.netrwhist
+
+# Linter caches
+.golangci-lint-cache/

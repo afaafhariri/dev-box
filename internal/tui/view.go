@@ -122,15 +122,27 @@ func (m Model) detail(item detector.Item) string {
 
 	var parts []string
 	for _, key := range metaOrder(item.Category) {
-		if v := item.Meta[key]; v != "" {
-			parts = append(parts, fmt.Sprintf("%s %s", key, v))
+		v := item.Meta[key]
+		if v == "" {
+			continue
 		}
+		if label, ok := metaLabels[key]; ok {
+			// The value already reads as a phrase; a key in front of it would
+			// only add noise.
+			parts = append(parts, label+v)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", key, v))
 	}
 	if len(parts) > 0 {
 		return strings.Join(parts, " · ")
 	}
 	return item.Path
 }
+
+// metaLabels overrides how a meta key is introduced. A key mapped to "" has
+// its value rendered bare.
+var metaLabels = map[string]string{"modelList": ""}
 
 // metaOrder picks which meta keys to surface per category, most interesting
 // first. Phase 2's detail view shows the rest.
