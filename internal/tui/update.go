@@ -5,6 +5,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"devenv/internal/action"
 )
 
 // timeSince is time.Since, indirected so the header can be tested.
@@ -128,6 +130,12 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Back):
+		// Esc backs out of the confirmation first, not the whole page: the
+		// user saying "no" should not also lose their place.
+		if m.detail.Confirming() {
+			m.detail.CancelConfirm()
+			return m, nil
+		}
 		m.page = m.prev
 
 	case key.Matches(msg, m.keys.Left), key.Matches(msg, m.keys.Up):
@@ -155,6 +163,13 @@ func (m Model) runAction() (tea.Model, tea.Cmd) {
 
 	selected, ok := m.detail.Selected()
 	if !ok {
+		return m, nil
+	}
+
+	// A destructive action costs a second, deliberate keypress. Enter moves
+	// between running things far too easily for uninstall to be one press.
+	if destructive, ok := selected.(action.Destructive); ok && !m.detail.Confirming() {
+		m.detail.RequestConfirm(destructive.Confirm(m.detail.Item()))
 		return m, nil
 	}
 

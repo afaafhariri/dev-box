@@ -74,8 +74,11 @@ func (m Model) tabBar() string {
 func (m Model) help() string {
 	if m.page == PageDetail {
 		hints := []string{"←/→ action", "enter run", "esc back", "q quit"}
-		if m.detail.Running() {
+		switch {
+		case m.detail.Running():
 			hints = []string{"running…", "esc back", "q quit"}
+		case m.detail.Confirming():
+			hints = []string{"enter confirm", "esc cancel", "q quit"}
 		}
 		return m.styles.Help.Render("  " + strings.Join(hints, " · "))
 	}

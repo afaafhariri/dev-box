@@ -32,6 +32,11 @@ type Prober interface {
 	// Exists reports whether a file or directory exists.
 	Exists(path string) bool
 
+	// Resolve follows symlinks to a path's real location. Homebrew puts
+	// symlinks on PATH and the real files under its Cellar, so resolving is
+	// the only way to learn which formula owns a binary.
+	Resolve(path string) (string, error)
+
 	// PortOpen reports whether something is accepting TCP connections.
 	PortOpen(ctx context.Context, host string, port int) bool
 
@@ -104,6 +109,14 @@ func (s *System) LookPath(name string) (string, error) {
 func (s *System) Exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func (s *System) Resolve(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+	return resolved, nil
 }
 
 func (s *System) PortOpen(ctx context.Context, host string, port int) bool {

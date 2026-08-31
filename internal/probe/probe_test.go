@@ -199,3 +199,59 @@ func TestExpand(t *testing.T) {
 		t.Errorf("Expand with no home = %q, want the input unchanged", got)
 	}
 }
+
+func TestResolveFollowsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	link := filepath.Join(dir, "link")
+
+	if err := os.WriteFile(real, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Homebrew puts symlinks on PATH and the real files under its Cellar, so
+	// this is how the owning formula is identified.
+	got, err := NewSystem().Resolve(link)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolvedReal, _ := filepath.EvalSymlinks(real); got != resolvedReal {
+		t.Errorf("Resolve() = %q, want %q", got, resolvedReal)
+	}
+}
+
+func TestResolveOnAPlainFileReturnsItself(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plain")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := NewSystem().Resolve(path)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved, _ := filepath.EvalSymlinks(path); got != resolved {
+		t.Errorf("Resolve() = %q, want %q", got, resolved)
+	}
+}
+
+func TestResolveMissingPathIsAnError(t *testing.T) {
+	if _, err := NewSystem().Resolve(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Error("Resolve() error = nil for a missing path")
+	}
+}
+
+func TestFakeResolveDefaultsToIdentity(t *testing.T) {
+	f := &Fake{Links: map[string]string{"/opt/homebrew/bin/psql": "/opt/homebrew/Cellar/postgresql@15/15.19/bin/psql"}}
+
+	if got, _ := f.Resolve("/opt/homebrew/bin/psql"); got != "/opt/homebrew/Cellar/postgresql@15/15.19/bin/psql" {
+		t.Errorf("Resolve() = %q", got)
+	}
+	if got, _ := f.Resolve("/usr/bin/git"); got != "/usr/bin/git" {
+		t.Errorf("Resolve() on a non-link = %q, want the input", got)
+	}
+}

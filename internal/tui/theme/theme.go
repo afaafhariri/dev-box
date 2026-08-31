@@ -111,6 +111,7 @@ var (
 	outputErr  = lipgloss.NewStyle().Foreground(colAmber)
 	actionSel  = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
 	actionIdle = lipgloss.NewStyle().Foreground(colMuted)
+	confirm    = lipgloss.NewStyle().Bold(true).Foreground(colAmber)
 )
 
 // FieldKey renders a detail-view label.
@@ -129,6 +130,10 @@ func (s Styles) Action(text string, selected bool) string {
 	}
 	return actionIdle.Render(text)
 }
+
+// Confirm renders the question asked before a destructive action runs. It is
+// amber rather than accent-coloured so it does not read as just another hint.
+func (s Styles) Confirm(text string) string { return confirm.Render(text) }
 
 // OutputLine styles a line of action output by what it represents: the command
 // that ran, a success, a failure, or ordinary output.

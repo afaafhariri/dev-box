@@ -25,6 +25,9 @@ type Fake struct {
 	Files map[string]bool
 	// Ports is the set of "host:port" strings PortOpen should accept.
 	Ports map[string]bool
+	// Links maps a path to what Resolve should return for it. A path with no
+	// entry resolves to itself, as an ordinary non-symlink file would.
+	Links map[string]string
 	// HomeDir is what Home returns.
 	HomeDir string
 
@@ -79,6 +82,16 @@ func (f *Fake) Exists(path string) bool {
 	defer f.mu.Unlock()
 
 	return f.Files[path]
+}
+
+func (f *Fake) Resolve(path string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if resolved, ok := f.Links[path]; ok {
+		return resolved, nil
+	}
+	return path, nil
 }
 
 func (f *Fake) PortOpen(_ context.Context, host string, port int) bool {

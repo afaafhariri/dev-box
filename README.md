@@ -132,13 +132,46 @@ your machine on its own and changes it only when you ask.
 | Start / Stop / Restart | A Homebrew-managed service, matching its current state |
 | Launch app | Docker and Ollama on macOS, when stopped |
 | Upgrade | Anything installed under a Homebrew prefix |
+| Uninstall | Anything installed under a Homebrew prefix whose formula can be identified |
 
 Output streams into a pane in the detail view as the action runs, and a rescan
 follows automatically so the new state is confirmed rather than assumed.
 
-Service actions only appear when Homebrew is actually installed, and `Upgrade`
-is deliberately limited to the Homebrew prefix — upgrading a pyenv-managed
-Python through `brew` would fight the tool that really manages it.
+Three deliberate limits:
+
+**Homebrew only.** Every action is gated on a Homebrew install path, and none
+are registered at all when `brew` is absent. Upgrading a pyenv-managed Python
+or uninstalling an nvm-managed Node through `brew` would fight the tool that
+really manages it.
+
+**The formula is resolved, never guessed.** A binary on `PATH` is a symlink into
+the Cellar, and that is what names the owning formula:
+
+```
+/opt/homebrew/bin/psql -> /opt/homebrew/Cellar/postgresql@15/15.19/bin/psql
+```
+
+So PostgreSQL resolves to `postgresql@15`, not `psql` or `postgresql` — both of
+which would fail, and one of which could act on a different package. If no
+formula can be established, the action is not offered.
+
+**Uninstall asks first.** `Enter` runs the selected action and `←`/`→` move
+between them, which is far too easy a way to remove something. Uninstall instead
+puts the exact command up for confirmation, and needs a second `Enter`:
+
+```
+    Stop    Restart    Upgrade  ▸ Uninstall
+
+  Run 'brew uninstall postgresql@15'? Stored data under the Homebrew prefix is
+  left in place. Press enter again to confirm, esc to cancel.
+
+  enter confirm · esc cancel · q quit
+```
+
+`Esc` cancels without leaving the page, and moving to another action clears the
+pending confirmation so a `yes` can never land on something you did not read.
+Uninstall runs without `--force` or `--ignore-dependencies`: if another formula
+depends on this one, Homebrew refuses and says so, which is the right outcome.
 
 ## Configuration
 

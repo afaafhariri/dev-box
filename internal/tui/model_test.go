@@ -295,6 +295,165 @@ func TestASecondActionCannotStartWhileOneRuns(t *testing.T) {
 	}
 }
 
+// brewItem is installed under a Homebrew prefix whose symlink resolves to a
+// Cellar path, so the destructive actions apply to it.
+func brewItem(name string, cat detector.Category, status detector.Status) detector.Item {
+	return detector.Item{
+		Name: name, Category: cat, Status: status, Version: "1.0.0",
+		Path: "/opt/homebrew/bin/" + strings.ToLower(name),
+	}
+}
+
+// destructiveModel wires a probe whose symlinks resolve into the Cellar.
+func destructiveModel(t *testing.T, items ...detector.Item) Model {
+	t.Helper()
+
+	st := store.New()
+	t.Cleanup(st.Close)
+	for _, it := range items {
+		st.Set(it)
+	}
+
+	links := make(map[string]string, len(items))
+	for _, it := range items {
+		links[it.Path] = "/opt/homebrew/Cellar/" + strings.ToLower(it.Name) + "/1.0.0/bin/" + strings.ToLower(it.Name)
+	}
+
+	actions := action.DefaultRegistry(&probe.Fake{
+		Paths: map[string]string{"brew": "/opt/homebrew/bin/brew"},
+		Links: links,
+	})
+
+	m := New(context.Background(), st, &stubScanner{n: len(items)}, actions)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	next, _ = next.(Model).Update(scanCompleteMsg{Elapsed: time.Millisecond})
+	return next.(Model)
+}
+
+// selectAction moves the cursor onto the action with the given label.
+func selectAction(t *testing.T, m Model, label string) Model {
+	t.Helper()
+
+	for i := 0; i < 8; i++ {
+		if sel, ok := m.detail.Selected(); ok && sel.Label() == label {
+			return m
+		}
+		m = press(m, "l")
+	}
+	t.Fatalf("no %q action offered", label)
+	return m
+}
+
+func TestDestructiveActionAsksBeforeRunning(t *testing.T) {
+	m := destructiveModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
+	m = press(m, "enter")
+	m = selectAction(t, m, "Uninstall")
+
+	// First enter must only ask.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+
+	if cmd != nil {
+		t.Error("a destructive action started on the first keypress")
+	}
+	if !m.detail.Confirming() {
+		t.Fatal("no confirmation was requested")
+	}
+	if m.detail.Running() {
+		t.Error("the action is running despite an unanswered confirmation")
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "brew uninstall") {
+		t.Errorf("the confirmation does not name the command:\n%s", view)
+	}
+	if !strings.Contains(view, "enter confirm") {
+		t.Error("the help line does not explain how to answer")
+	}
+}
+
+func TestConfirmingRunsTheAction(t *testing.T) {
+	m := destructiveModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
+	m = press(m, "enter")
+	m = selectAction(t, m, "Uninstall")
+
+	m = press(m, "enter") // ask
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+
+	if cmd == nil {
+		t.Fatal("the confirmed action did not start")
+	}
+	if !m.detail.Running() {
+		t.Error("the action is not marked running after confirmation")
+	}
+	if m.detail.Confirming() {
+		t.Error("the confirmation outlived the answer")
+	}
+}
+
+func TestEscapeCancelsTheConfirmationWithoutLeavingThePage(t *testing.T) {
+	m := destructiveModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
+	m = press(m, "enter")
+	m = selectAction(t, m, "Uninstall")
+	m = press(m, "enter") // ask
+
+	m = press(m, "esc")
+
+	if m.detail.Confirming() {
+		t.Error("esc did not cancel the confirmation")
+	}
+	if m.detail.Running() {
+		t.Error("esc ran the action")
+	}
+	// Saying no should not also lose your place.
+	if m.page != PageDetail {
+		t.Errorf("page = %v, want to stay on the detail view", m.page)
+	}
+
+	// A second esc leaves, as usual.
+	m = press(m, "esc")
+	if m.page == PageDetail {
+		t.Error("esc did not leave the detail view once nothing was pending")
+	}
+}
+
+func TestMovingCancelsAPendingConfirmation(t *testing.T) {
+	m := destructiveModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
+	m = press(m, "enter")
+	m = selectAction(t, m, "Uninstall")
+	m = press(m, "enter") // ask
+
+	// Moving to another action must not leave a yes armed on it.
+	m = press(m, "h")
+
+	if m.detail.Confirming() {
+		t.Error("moving between actions left the confirmation armed")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected the newly selected action to run")
+	}
+	if got, _ := next.(Model).detail.Selected(); got.Label() == "Uninstall" {
+		t.Error("the cursor was still on Uninstall")
+	}
+}
+
+func TestNonDestructiveActionsRunImmediately(t *testing.T) {
+	m := destructiveModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
+	m = press(m, "enter")
+	m = selectAction(t, m, "Start")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Start did not run")
+	}
+	if next.(Model).detail.Confirming() {
+		t.Error("Start asked for confirmation — only destructive actions should")
+	}
+}
+
 func TestMissingItemsAreHiddenUntilToggled(t *testing.T) {
 	m, _ := newTestModel(t, sampleItems()...)
 

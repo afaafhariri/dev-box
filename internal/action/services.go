@@ -3,9 +3,7 @@ package action
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"runtime"
-	"strings"
 
 	"devenv/internal/detector"
 	"devenv/internal/probe"
@@ -25,6 +23,8 @@ var brewFormulae = map[string]string{
 
 // BrewService starts, stops, or restarts a service through Homebrew.
 type BrewService struct {
+	// p resolves the item's real formula.
+	p probe.Prober
 	// label is the button text.
 	label string
 	// verb is the brew services subcommand.
@@ -36,18 +36,18 @@ type BrewService struct {
 }
 
 // NewBrewStart returns the "Start" action.
-func NewBrewStart() BrewService {
-	return BrewService{label: "Start", verb: "start", from: detector.StatusStopped, done: "started"}
+func NewBrewStart(p probe.Prober) BrewService {
+	return BrewService{p: p, label: "Start", verb: "start", from: detector.StatusStopped, done: "started"}
 }
 
 // NewBrewStop returns the "Stop" action.
-func NewBrewStop() BrewService {
-	return BrewService{label: "Stop", verb: "stop", from: detector.StatusRunning, done: "stopped"}
+func NewBrewStop(p probe.Prober) BrewService {
+	return BrewService{p: p, label: "Stop", verb: "stop", from: detector.StatusRunning, done: "stopped"}
 }
 
 // NewBrewRestart returns the "Restart" action.
-func NewBrewRestart() BrewService {
-	return BrewService{label: "Restart", verb: "restart", from: detector.StatusRunning, done: "restarted"}
+func NewBrewRestart(p probe.Prober) BrewService {
+	return BrewService{p: p, label: "Restart", verb: "restart", from: detector.StatusRunning, done: "restarted"}
 }
 
 func (a BrewService) Label() string { return a.label }
@@ -58,11 +58,17 @@ func (a BrewService) Applicable(item detector.Item) bool {
 }
 
 func (a BrewService) Run(ctx context.Context, item detector.Item) <-chan string {
-	formula, ok := brewFormulae[item.Name]
-	if !ok {
+	// Prefer the formula resolved from the install path: versioned formulae
+	// are common for databases, and "brew services start postgresql" fails
+	// outright when what is installed is postgresql@15.
+	name := formula(a.p, item)
+	if name == "" {
+		name = brewFormulae[item.Name]
+	}
+	if name == "" {
 		return closed(fmt.Sprintf("✗ %s is not managed by Homebrew", item.Name))
 	}
-	return run(ctx, fmt.Sprintf("%s %s", item.Name, a.done), "brew", "services", a.verb, formula)
+	return run(ctx, fmt.Sprintf("%s %s", item.Name, a.done), "brew", "services", a.verb, name)
 }
 
 // macApps maps an item to the macOS application that provides it, for the
@@ -100,10 +106,10 @@ func (a LaunchApp) Run(ctx context.Context, item detector.Item) <-chan string {
 }
 
 // Upgrade updates a Homebrew-installed tool.
-type Upgrade struct{}
+type Upgrade struct{ p probe.Prober }
 
 // NewUpgrade returns the "Upgrade" action.
-func NewUpgrade() Upgrade { return Upgrade{} }
+func NewUpgrade(p probe.Prober) Upgrade { return Upgrade{p: p} }
 
 func (a Upgrade) Label() string { return "Upgrade" }
 
@@ -111,37 +117,15 @@ func (a Upgrade) Applicable(item detector.Item) bool {
 	// Only offer this for things Homebrew installed, which its own prefix
 	// identifies. Upgrading anything else risks fighting the tool that
 	// actually manages it — pyenv, nvm, a system package manager.
-	return item.Status.Found() && isBrewPath(item.Path)
+	return item.Status.Found() && IsBrewPath(item.Path)
 }
 
 func (a Upgrade) Run(ctx context.Context, item detector.Item) <-chan string {
-	formula := brewFormulae[item.Name]
-	if formula == "" {
-		formula = brewName(item)
+	name := formula(a.p, item)
+	if name == "" {
+		return closed(fmt.Sprintf("✗ could not work out which Homebrew formula owns %s", binaryName(item)))
 	}
-	return run(ctx, fmt.Sprintf("%s upgraded", item.Name), "brew", "upgrade", formula)
-}
-
-// brewPrefixes are the standard Homebrew install roots: Apple silicon,
-// Intel macOS, and Linuxbrew.
-var brewPrefixes = []string{"/opt/homebrew/", "/usr/local/Cellar/", "/usr/local/opt/", "/home/linuxbrew/"}
-
-func isBrewPath(path string) bool {
-	for _, prefix := range brewPrefixes {
-		if strings.HasPrefix(path, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// brewName guesses the formula name from the binary that was detected, which
-// is right for the many tools whose formula matches their command.
-func brewName(item detector.Item) string {
-	if bin := item.Meta["binary"]; bin != "" {
-		return bin
-	}
-	return filepath.Base(item.Path)
+	return run(ctx, fmt.Sprintf("%s upgraded", item.Name), "brew", "upgrade", name)
 }
 
 // closed returns an already-finished channel carrying one line, for the
@@ -162,7 +146,9 @@ func DefaultRegistry(p probe.Prober) *Registry {
 	r := NewRegistry()
 
 	if _, err := p.LookPath("brew"); err == nil {
-		r.Register(NewBrewStart(), NewBrewStop(), NewBrewRestart(), NewUpgrade())
+		// Uninstall is registered last so it sits at the far end of the
+		// action bar, away from the one people reach for most.
+		r.Register(NewBrewStart(p), NewBrewStop(p), NewBrewRestart(p), NewUpgrade(p), NewUninstall(p))
 	}
 	if runtime.GOOS == "darwin" {
 		r.Register(NewLaunchApp())

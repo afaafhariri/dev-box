@@ -21,6 +21,9 @@ type Detail struct {
 	cursor  int
 	output  []string
 	running bool
+	// confirm holds the question awaiting a yes for a destructive action.
+	// Empty means nothing is pending.
+	confirm string
 	height  int
 	styles  theme.Styles
 }
@@ -38,6 +41,7 @@ func (d *Detail) SetItem(item detector.Item, actions []action.Action) {
 	d.cursor = 0
 	d.output = nil
 	d.running = false
+	d.confirm = ""
 }
 
 // Update refreshes the open item in place, so a rescan behind the detail view
@@ -63,8 +67,11 @@ func (d *Detail) SetHeight(height int) { d.height = height }
 // Item is the item on show.
 func (d *Detail) Item() detector.Item { return d.item }
 
-// Move shifts the action selection.
+// Move shifts the action selection. Moving away from a pending confirmation
+// cancels it, so a yes can never land on an action the user did not read.
 func (d *Detail) Move(delta int) {
+	d.confirm = ""
+
 	if len(d.actions) == 0 {
 		return
 	}
@@ -88,10 +95,20 @@ func (d *Detail) Selected() (action.Action, bool) {
 // Running reports whether an action is in flight.
 func (d *Detail) Running() bool { return d.running }
 
+// RequestConfirm puts a question to the user before a destructive action runs.
+func (d *Detail) RequestConfirm(question string) { d.confirm = question }
+
+// Confirming reports whether a confirmation is pending.
+func (d *Detail) Confirming() bool { return d.confirm != "" }
+
+// CancelConfirm dismisses a pending confirmation without running anything.
+func (d *Detail) CancelConfirm() { d.confirm = "" }
+
 // StartRun clears the pane and marks an action as running.
 func (d *Detail) StartRun() {
 	d.output = nil
 	d.running = true
+	d.confirm = ""
 }
 
 // FinishRun marks the running action as done.
@@ -126,6 +143,11 @@ func (d *Detail) View() string {
 
 	b.WriteString("\n")
 	b.WriteString(d.actionBar())
+
+	if d.confirm != "" {
+		b.WriteString("\n\n")
+		b.WriteString(d.styles.Confirm("  " + d.confirm))
+	}
 
 	if len(d.output) > 0 {
 		b.WriteString("\n\n")
