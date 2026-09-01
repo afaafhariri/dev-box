@@ -150,3 +150,17 @@ func writeFile(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+func TestHelpExitsSuccessfully(t *testing.T) {
+	// Asking for help is a deliberate, successful invocation, not a usage
+	// error — scripts and shells read the exit code.
+	for _, flag := range []string{"-h", "--help"} {
+		code, _, errOut := run(t, flag)
+		if code != 0 {
+			t.Errorf("%s exit code = %d, want 0", flag, code)
+		}
+		if !strings.Contains(errOut, "Usage:") {
+			t.Errorf("%s printed no usage text", flag)
+		}
+	}
+}

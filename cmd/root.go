@@ -7,6 +7,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -41,6 +42,11 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	)
 
 	if err := fs.Parse(args); err != nil {
+		// -h and --help are deliberate, successful invocations: the usage
+		// text is what was asked for, not a complaint about it.
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 
