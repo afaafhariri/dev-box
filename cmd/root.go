@@ -31,6 +31,8 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 
 	var (
 		asJSON      = fs.Bool("json", false, "print one scan as JSON and exit, instead of starting the TUI")
+		format      = fs.String("format", "", "print one scan in this format and exit: json or markdown")
+		refresh     = fs.Duration("refresh", 0, "rescan automatically on this interval while the TUI is open")
 		listOnly    = fs.Bool("list", false, "list the registered detectors and exit")
 		showVersion = fs.Bool("version", false, "print the devenv version and exit")
 		timeout     = fs.Duration("timeout", 0, "per-command timeout for a single detector probe (overrides the config file)")
@@ -48,7 +50,11 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 
 	opts := app.DefaultOptions()
-	opts.JSON = *asJSON
+	opts.Format = *format
+	if *asJSON && opts.Format == "" {
+		opts.Format = "json"
+	}
+	opts.Refresh = *refresh
 	opts.Timeout = *timeout
 	opts.ConfigPath = *configPath
 	opts.NoCache = *noCache

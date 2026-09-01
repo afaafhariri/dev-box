@@ -15,7 +15,11 @@ import (
 //	v22.3.0
 //	git version 2.39.5 (Apple Git-154)
 //	Redis server v=7.2.4 sha=00000000:0
-var versionPattern = regexp.MustCompile(`\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?`)
+//
+// A pre-release suffix is kept, because it says which version this is, but
+// semver build metadata is not: helm reports "v3.15.2+g1a500d5", and the
+// commit hash after the plus belongs in neither a list nor a comparison.
+var versionPattern = regexp.MustCompile(`\d+(?:\.\d+)+(?:-[0-9A-Za-z.]+)?`)
 
 // Version extracts the first version-looking token from command output,
 // returning "" when there is none.

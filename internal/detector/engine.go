@@ -14,12 +14,19 @@ import (
 type Engine struct {
 	detectors []Detector
 	sink      Sink
+	resolver  Resolver
 	now       func() time.Time // swappable for deterministic tests
 }
 
 // NewEngine wires a registry to a sink.
 func NewEngine(sink Sink, detectors ...Detector) *Engine {
 	return &Engine{detectors: detectors, sink: sink, now: time.Now}
+}
+
+// WithResolver sets the resolver applied to every successful detection.
+func (e *Engine) WithResolver(r Resolver) *Engine {
+	e.resolver = r
+	return e
 }
 
 // Len is the number of detectors the engine will run.
@@ -77,6 +84,13 @@ func (e *Engine) run(ctx context.Context, d Detector) (item Item) {
 	}
 	if item.DetectedAt.IsZero() {
 		item.DetectedAt = e.now()
+	}
+
+	// Ownership is resolved here rather than in each detector: it is the same
+	// question for all of them, and it depends on the platform rather than on
+	// the tool being detected.
+	if e.resolver != nil {
+		item = e.resolver.Resolve(ctx, item)
 	}
 	return item
 }

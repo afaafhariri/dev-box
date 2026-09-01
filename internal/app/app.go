@@ -5,11 +5,11 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -23,6 +23,8 @@ import (
 	"devenv/internal/detectors/managers"
 	"devenv/internal/detectors/servers"
 	"devenv/internal/detectors/tools"
+	"devenv/internal/export"
+	"devenv/internal/platform"
 	"devenv/internal/probe"
 	"devenv/internal/store"
 	"devenv/internal/tui"
@@ -36,8 +38,11 @@ type Options struct {
 	Timeout time.Duration
 	// NoCache disables the disk cache for this run.
 	NoCache bool
-	// JSON prints one scan as JSON instead of starting the TUI.
-	JSON bool
+	// Format, when set, prints one scan in that format instead of starting
+	// the TUI. "json" or "markdown".
+	Format string
+	// Refresh, when non-zero, rescans on this interval in the background.
+	Refresh time.Duration
 	// Out is where JSON output goes.
 	Out io.Writer
 }
@@ -54,6 +59,7 @@ type App struct {
 	store    *store.Store
 	registry *detector.Registry
 	engine   *detector.Engine
+	updates  *platform.Updates
 	actions  *action.Registry
 	cache    *store.Cache
 }
@@ -99,8 +105,13 @@ func New(opts Options) (*App, error) {
 		store:    st,
 		registry: registry,
 		engine:   detector.NewEngine(st, registry.All()...),
-		actions:  action.DefaultRegistry(p),
+		actions:  action.DefaultRegistry(),
 	}
+
+	// Update availability is asked of each package manager once per scan, and
+	// the answers tag items as ownership is resolved.
+	app.updates = platform.NewUpdates(p)
+	app.engine.WithResolver(platform.NewResolver(p).WithUpdates(app.updates))
 
 	if !opts.NoCache && !cfg.Scan.NoCache {
 		if cachePath, err := store.DefaultPath("cache.json"); err == nil {
@@ -130,17 +141,18 @@ func (a *App) Run(ctx context.Context) error {
 	defer stop()
 	defer a.store.Close()
 
-	if a.opts.JSON {
+	if a.opts.Format != "" {
 		return a.runOnce(ctx)
 	}
 	return a.runTUI(ctx)
 }
 
-// runOnce performs a single scan and writes the result as JSON. It is the
-// headless path used for scripting and for verifying detection without a
-// terminal, so it always scans fresh rather than trusting the cache.
+// runOnce performs a single scan and writes it out. It is the headless path
+// used for scripting and for sharing an environment, so it always scans fresh
+// rather than trusting the cache.
 func (a *App) runOnce(ctx context.Context) error {
 	start := time.Now()
+	a.updates.Refresh(ctx)
 	a.engine.RunAll(ctx)
 	items := a.store.All()
 
@@ -149,22 +161,21 @@ func (a *App) runOnce(ctx context.Context) error {
 		_ = a.cache.Save(items)
 	}
 
-	payload := struct {
-		ScannedAt time.Time       `json:"scannedAt"`
-		Elapsed   string          `json:"elapsed"`
-		Items     []detector.Item `json:"items"`
-	}{
+	snap := export.Snapshot{
 		ScannedAt: start,
 		Elapsed:   time.Since(start).Round(time.Millisecond).String(),
+		OS:        runtime.GOOS + "/" + runtime.GOARCH,
 		Items:     items,
 	}
 
-	enc := json.NewEncoder(a.opts.Out)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(payload); err != nil {
-		return fmt.Errorf("encode scan: %w", err)
+	switch a.opts.Format {
+	case "markdown", "md":
+		return export.Markdown(a.opts.Out, snap)
+	case "json":
+		return export.JSON(a.opts.Out, snap)
+	default:
+		return fmt.Errorf("unknown format %q: use json or markdown", a.opts.Format)
 	}
-	return nil
 }
 
 // runTUI starts the Bubble Tea program, priming the store from the cache first
@@ -176,7 +187,7 @@ func (a *App) runTUI(ctx context.Context) error {
 		}
 	}
 
-	model := tui.New(ctx, a.store, a.scanner(), a.actions)
+	model := tui.New(ctx, a.store, a.scanner(), a.actions, a.opts.Refresh)
 
 	program := tea.NewProgram(
 		model,
@@ -198,26 +209,30 @@ func (a *App) runTUI(ctx context.Context) error {
 // cache. The TUI drives scans, so the write has to happen underneath it.
 func (a *App) scanner() tui.Scanner {
 	if a.cache == nil {
-		return a.engine
+		return &cachingScanner{engine: a.engine, store: a.store, updates: a.updates}
 	}
-	return &cachingScanner{engine: a.engine, store: a.store, cache: a.cache}
+	return &cachingScanner{engine: a.engine, store: a.store, cache: a.cache, updates: a.updates}
 }
 
 // cachingScanner saves the store to disk after each completed scan.
 type cachingScanner struct {
-	engine *detector.Engine
-	store  *store.Store
-	cache  *store.Cache
+	engine  *detector.Engine
+	store   *store.Store
+	cache   *store.Cache
+	updates *platform.Updates
 }
 
 func (c *cachingScanner) Len() int { return c.engine.Len() }
 
 func (c *cachingScanner) RunAll(ctx context.Context) {
+	if c.updates != nil {
+		c.updates.Refresh(ctx)
+	}
 	c.engine.RunAll(ctx)
 
 	// Never persist the partial results of an interrupted scan: they would
 	// look authoritative on the next launch.
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || c.cache == nil {
 		return
 	}
 	_ = c.cache.Save(c.store.All())

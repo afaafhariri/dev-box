@@ -12,6 +12,7 @@ import (
 
 	"devenv/internal/action"
 	"devenv/internal/detector"
+	"devenv/internal/search"
 	"devenv/internal/store"
 	"devenv/internal/tui/pages"
 	"devenv/internal/tui/theme"
@@ -56,6 +57,8 @@ var tabs = []struct {
 
 // Messages carried from the engine, store, and actions into the update loop.
 type (
+	// refreshTickMsg is the background rescan timer firing.
+	refreshTickMsg struct{}
 	// itemUpdatedMsg means the store changed. The item is carried for
 	// progress counting; the pages always re-read the store.
 	itemUpdatedMsg struct{ Item detector.Item }
@@ -95,6 +98,15 @@ type Model struct {
 
 	showMissing bool
 
+	// searching is true while the filter input has focus.
+	searching bool
+	// query is the current filter, applied whether or not the input is
+	// focused, so a filter survives leaving search mode.
+	query string
+
+	// refreshEvery is the background rescan interval; zero disables it.
+	refreshEvery time.Duration
+
 	scanning bool
 	// pendingScan records a scan asked for while one was already running, so
 	// it can be honoured rather than dropped.
@@ -108,7 +120,7 @@ type Model struct {
 // New builds the root model. The store subscription is taken once here rather
 // than per message, so the update loop reuses one channel instead of
 // registering a new subscriber on every item.
-func New(ctx context.Context, s *store.Store, scanner Scanner, actions *action.Registry) Model {
+func New(ctx context.Context, s *store.Store, scanner Scanner, actions *action.Registry, refresh time.Duration) Model {
 	styles := theme.New()
 
 	sp := spinner.New()
@@ -121,17 +133,18 @@ func New(ctx context.Context, s *store.Store, scanner Scanner, actions *action.R
 	}
 
 	m := Model{
-		ctx:     ctx,
-		store:   s,
-		scanner: scanner,
-		actions: actions,
-		sub:     s.Subscribe(),
-		keys:    newKeyMap(),
-		styles:  styles,
-		spin:    sp,
-		lists:   lists,
-		detail:  pages.NewDetail(styles),
-		seen:    make(map[string]bool),
+		ctx:          ctx,
+		store:        s,
+		scanner:      scanner,
+		actions:      actions,
+		sub:          s.Subscribe(),
+		keys:         newKeyMap(),
+		styles:       styles,
+		spin:         sp,
+		lists:        lists,
+		detail:       pages.NewDetail(styles),
+		seen:         make(map[string]bool),
+		refreshEvery: refresh,
 		// The first scan is kicked off by Init, so the model starts busy.
 		scanning: true,
 		cachedAt: s.PrimedAt(),
@@ -142,11 +155,20 @@ func New(ctx context.Context, s *store.Store, scanner Scanner, actions *action.R
 
 // Init starts the first scan and arms the store listener.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.spin.Tick,
-		m.scanCmd(),
-		waitForItem(m.sub),
-	)
+	cmds := []tea.Cmd{m.spin.Tick, m.scanCmd(), waitForItem(m.sub)}
+	if cmd := m.refreshCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
+}
+
+// refreshCmd schedules the next background rescan, or nil when the feature is
+// switched off.
+func (m Model) refreshCmd() tea.Cmd {
+	if m.refreshEvery <= 0 {
+		return nil
+	}
+	return tea.Tick(m.refreshEvery, func(time.Time) tea.Msg { return refreshTickMsg{} })
 }
 
 // scanCmd runs the engine off the update loop and reports how long it took.
@@ -184,10 +206,13 @@ func waitForOutput(ch <-chan string) tea.Cmd {
 // refresh pushes the current store contents into every page.
 func (m *Model) refresh() {
 	items := m.store.All()
+	// The filter is applied before the pages split by category, so a query
+	// narrows every tab consistently.
+	filtered := search.Filter(items, m.query)
 
 	for _, list := range m.lists {
 		list.ShowMissing = m.showMissing
-		list.SetItems(items)
+		list.SetItems(filtered)
 	}
 
 	// Keep an open detail view in step with the rescan behind it.
@@ -201,8 +226,12 @@ func (m *Model) refresh() {
 
 // layout hands each page the space it may draw in.
 func (m *Model) layout() {
-	// Header, tab bar, spacing, and help line.
+	// Header, tab bar, spacing, and help line — plus the search line when one
+	// is on screen.
 	body := m.height - 6
+	if m.searching || m.query != "" {
+		body--
+	}
 	if body < 1 {
 		body = 1
 	}
@@ -219,6 +248,17 @@ func (m Model) list() *pages.List {
 		return l
 	}
 	return m.lists[m.prev]
+}
+
+// outdatedCount is how many detected items have a newer version available.
+func (m Model) outdatedCount() int {
+	n := 0
+	for _, item := range m.store.All() {
+		if item.UpdateAvail {
+			n++
+		}
+	}
+	return n
 }
 
 // missingCount is how many detected-as-absent items the filter is hiding.

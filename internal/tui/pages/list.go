@@ -237,6 +237,11 @@ func (l *List) row(item detector.Item, selected bool) string {
 	if version == "" {
 		version = "—"
 	}
+	// A bullet beside the version is enough to spot an update at a glance
+	// without widening the column for every row that has nothing to say.
+	if item.UpdateAvail {
+		version += " •"
+	}
 
 	row := lipgloss.JoinHorizontal(lipgloss.Left,
 		cursor,
@@ -298,6 +303,8 @@ func metaOrder(cat detector.Category) []string {
 		return []string{"npm", "pip", "toolchain", "platform"}
 	case detector.CategoryTool:
 		return []string{"packages", "packageList"}
+	case detector.CategoryManager:
+		return nil
 	default:
 		return nil
 	}

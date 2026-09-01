@@ -60,16 +60,17 @@ devenv  Dev Environment Manager  10 of 11 found · 21:09:15 in 280ms
 
 ## Status
 
-Phases 1 and 2 of the architecture plan are complete: a concurrent scanner over
-36 detectors, a thread-safe store with a disk cache, tabbed pages with a detail
-view, an action engine, and a TOML config file. Phase 3 (fuzzy search,
-update-available detection, background refresh, Markdown export) is not
-started.
+All three phases of the architecture plan are complete: a concurrent scanner
+over 36 detectors, a thread-safe store with a disk cache, tabbed pages with a
+detail view, an ownership-aware action engine, a TOML config file, fuzzy
+search, update detection, background refresh, and Markdown export.
 
 ## Requirements
 
-Go 1.25 or newer. macOS and Linux; detection strategies are POSIX-oriented and
-Windows is not supported yet.
+Go 1.25 or newer. Builds and runs on macOS, Linux, and Windows.
+
+What differs per platform is what devenv will *do* for you, not what it can
+see — see [Ownership](#ownership) below.
 
 ## Build and run
 
@@ -85,6 +86,8 @@ go build -o devenv .    # build a binary
 | `--json` | Run one scan, print the result as JSON, and exit. No TUI. |
 | `--list` | List the registered detectors and exit. |
 | `--timeout` | Per-command timeout for a single probe. Overrides the config file. |
+| `--format` | Print one scan and exit: `json` or `markdown`. |
+| `--refresh` | Rescan automatically on this interval while the TUI is open. |
 | `--config` | Config file path (default `~/.config/devenv/config.toml`). |
 | `--no-cache` | Ignore the disk cache for this run. |
 | `--version` | Print the version and exit. |
@@ -94,6 +97,14 @@ works over SSH, in CI, and inside a pipe:
 
 ```sh
 devenv --json | jq '.items[] | select(.status == "running") | .name'
+```
+
+`--format markdown` writes a document you can paste into an issue or a README:
+a table per category with versions, ownership, and paths, and the things you
+do not have listed at the end.
+
+```sh
+devenv --format markdown > ENVIRONMENT.md
 ```
 
 ### Keys
@@ -108,6 +119,7 @@ devenv --json | jq '.items[] | select(.status == "running") | .name'
 | `←` / `→` | Choose an action in the detail view |
 | `g` / `G` | Jump to top / bottom |
 | `r` | Rescan |
+| `/` | Search — type to filter, `Enter` keeps it, `Esc` clears it |
 | `a` | Show or hide items that were not found |
 | `q` / `Ctrl-C` | Quit |
 
@@ -129,49 +141,100 @@ your machine on its own and changes it only when you ask.
 
 | Action | Offered for |
 | --- | --- |
-| Start / Stop / Restart | A Homebrew-managed service, matching its current state |
-| Launch app | Docker and Ollama on macOS, when stopped |
-| Upgrade | Anything installed under a Homebrew prefix |
-| Uninstall | Anything installed under a Homebrew prefix whose formula can be identified |
+| Start / Stop / Restart | A service whose manager devenv can drive on this OS |
+| Upgrade | An install whose manager devenv can drive |
+| Uninstall | The same, behind a confirmation |
 
 Output streams into a pane in the detail view as the action runs, and a rescan
 follows automatically so the new state is confirmed rather than assumed.
 
-Three deliberate limits:
+<a name="ownership"></a>
 
-**Homebrew only.** Every action is gated on a Homebrew install path, and none
-are registered at all when `brew` is absent. Upgrading a pyenv-managed Python
-or uninstalling an nvm-managed Node through `brew` would fight the tool that
-really manages it.
+### Ownership — who installed this?
 
-**The formula is resolved, never guessed.** A binary on `PATH` is a symlink into
-the Cellar, and that is what names the owning formula:
+Every scan works out which tool owns each install, because that single fact
+decides everything else: whether an action is possible, which command it
+should run, and what to tell you when devenv will not act.
+
+```
+Node.js   ~/.nvm/versions/node/v22.13.1/bin/node   ->  nvm (v22.13.1)
+Python    /opt/homebrew/bin/python3                ->  Homebrew (python@3.14)
+Ruby      /usr/bin/ruby                            ->  system
+Go        /usr/local/go/bin/go                     ->  manual install
+```
+
+The identifier is resolved, never guessed. A binary on `PATH` is usually a
+symlink into the package manager's own tree, and that is what names the
+package:
 
 ```
 /opt/homebrew/bin/psql -> /opt/homebrew/Cellar/postgresql@15/15.19/bin/psql
 ```
 
-So PostgreSQL resolves to `postgresql@15`, not `psql` or `postgresql` — both of
-which would fail, and one of which could act on a different package. If no
-formula can be established, the action is not offered.
+So PostgreSQL resolves to `postgresql@15` — not `psql` or `postgresql`, both of
+which would fail, and one of which could act on a different package entirely.
+On Linux the distribution database is asked directly (`dpkg -S`, `rpm -qf`,
+`pacman -Qo`), which is authoritative rather than inferred.
 
-**Uninstall asks first.** `Enter` runs the selected action and `←`/`→` move
-between them, which is far too easy a way to remove something. Uninstall instead
-puts the exact command up for confirmation, and needs a second `Enter`:
+**When devenv will not act, it says who does own the install and what to run.**
+"No actions available" on its own is a dead end:
+
+```
+  Node.js  installed
+
+  managed by  nvm  (v22.13.1)
+
+  managed by nvm — run 'nvm uninstall 22.13.1' to remove this version
+```
+
+Three rules decide whether an action appears:
+
+**System installs are protected.** `/usr/bin/ruby` belongs to macOS; removing it
+breaks other software, so nothing is offered for it at any time.
+
+**Managers needing elevation advise instead of acting.** devenv runs actions
+with no stdin, so a `sudo` password prompt would hang with no way to answer it.
+APT, DNF, pacman, snap, WinGet, and Chocolatey therefore print the command for
+you to run. Homebrew and Scoop install into user-owned trees and are driven
+directly.
+
+**Version managers own their own versions.** nvm, pyenv, rbenv, SDKMAN!, mise,
+asdf, and rustup each have an uninstall of their own, and reaching around them
+with a package manager would corrupt what they track.
+
+| Platform | Services | Packages |
+| --- | --- | --- |
+| macOS | `brew services` | Homebrew |
+| Linux | `systemctl --user`, `brew services` | Homebrew; APT / DNF / pacman / snap advise |
+| Windows | not attempted (needs elevation) | Scoop; WinGet / Chocolatey advise |
+
+### Uninstall asks first
+
+`Enter` runs the selected action and `←`/`→` move between them, which is far too
+easy a way to remove something. Uninstall instead puts the exact command up for
+confirmation and needs a second `Enter`:
 
 ```
     Stop    Restart    Upgrade  ▸ Uninstall
 
-  Run 'brew uninstall postgresql@15'? Stored data under the Homebrew prefix is
-  left in place. Press enter again to confirm, esc to cancel.
+  Run 'brew uninstall postgresql@15'? Stored data is left in place.
+  Press enter again to confirm, esc to cancel.
 
   enter confirm · esc cancel · q quit
 ```
 
 `Esc` cancels without leaving the page, and moving to another action clears the
 pending confirmation so a `yes` can never land on something you did not read.
-Uninstall runs without `--force` or `--ignore-dependencies`: if another formula
-depends on this one, Homebrew refuses and says so, which is the right outcome.
+Nothing runs with `--force` or dependency overrides: if another package depends
+on this one, the package manager refuses and says so, which is the right
+outcome.
+
+### Updates
+
+Each scan asks every package manager it can drive which of its packages are out
+of date — once per manager, not once per item. Outdated entries are marked with
+a bullet beside the version, counted in the header, and spelled out in the
+detail view.
 
 ## Configuration
 
@@ -255,18 +318,23 @@ internal/
     tools/               git and the CLI/package-manager catalog
     managers/            nvm, pyenv, sdkman, mise, rbenv
     parse/               shared version-string helpers
+  platform/              who owns an install, and what can be done about it
+  search/                fuzzy filtering
+  export/                JSON and Markdown output
   store/                 in-memory state, subscriptions, disk cache
   tui/                   root model, update, view, keys
     pages/               list and detail sub-models
     theme/               colour tokens and Lip Gloss styles
 ```
 
-### Four interfaces
+### Five interfaces
 
 `Detector` is implemented once per tool and returns an `Item` describing what
 was found. `Prober` is the only way a detector touches the operating system.
-`Sink` is what the engine writes results to — the store implements it. `Action`
-is one operation a user can trigger, returning a channel of output lines.
+`Sink` is what the engine writes results to — the store implements it.
+`Resolver` enriches each result with facts the detector does not know, chiefly
+who owns the install. `Action` is one operation a user can trigger, returning a
+channel of output lines.
 
 Detectors depend on `Prober` rather than `os/exec` directly, which is what makes
 them testable: every detector test runs against an in-memory `probe.Fake` and

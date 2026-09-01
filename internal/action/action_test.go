@@ -7,171 +7,175 @@ import (
 	"testing"
 
 	"devenv/internal/detector"
-	"devenv/internal/probe"
+	"devenv/internal/platform"
 )
 
-func service(name string, status detector.Status) detector.Item {
-	return detector.Item{Name: name, Category: detector.CategoryServer, Status: status}
+// owned builds an item as the scan would leave it: ownership already resolved.
+func owned(name string, cat detector.Category, status detector.Status, managedBy, pkg string) detector.Item {
+	return detector.Item{
+		Name: name, Category: cat, Status: status,
+		ManagedBy: managedBy, PackageID: pkg, Version: "1.0.0",
+	}
+}
+
+func brewService(name string, status detector.Status, pkg string) detector.Item {
+	return owned(name, detector.CategoryServer, status, platform.Homebrew, pkg)
 }
 
 func TestStartAppliesOnlyToStoppedServices(t *testing.T) {
-	start := NewBrewStart(brewProbe())
+	start := NewStart(platform.Darwin)
 
-	if !start.Applicable(service("PostgreSQL", detector.StatusStopped)) {
+	if !start.Applicable(brewService("PostgreSQL", detector.StatusStopped, "postgresql@15")) {
 		t.Error("Start should apply to a stopped service")
 	}
-	if start.Applicable(service("PostgreSQL", detector.StatusRunning)) {
+	if start.Applicable(brewService("PostgreSQL", detector.StatusRunning, "postgresql@15")) {
 		t.Error("Start should not apply to a service already running")
 	}
-	// Nothing here knows how to start Go.
-	if start.Applicable(detector.Item{Name: "Go", Status: detector.StatusInstalled}) {
-		t.Error("Start should not apply to something Homebrew does not manage")
+	// A language is not a service, whoever installed it.
+	if start.Applicable(owned("Python", detector.CategoryLanguage, detector.StatusInstalled, platform.Homebrew, "python@3.14")) {
+		t.Error("Start should not apply to a language")
 	}
 }
 
 func TestStopAppliesOnlyToRunningServices(t *testing.T) {
-	stop := NewBrewStop(brewProbe())
+	stop := NewStop(platform.Darwin)
 
-	if !stop.Applicable(service("Redis", detector.StatusRunning)) {
+	if !stop.Applicable(brewService("Redis", detector.StatusRunning, "redis")) {
 		t.Error("Stop should apply to a running service")
 	}
-	if stop.Applicable(service("Redis", detector.StatusStopped)) {
+	if stop.Applicable(brewService("Redis", detector.StatusStopped, "redis")) {
 		t.Error("Stop should not apply to a service already stopped")
 	}
 }
 
-// brewProbe resolves Homebrew symlinks the way the real prefix does.
-func brewProbe() *probe.Fake {
-	return &probe.Fake{
-		Paths: map[string]string{"brew": "/opt/homebrew/bin/brew"},
-		Links: map[string]string{
-			"/opt/homebrew/bin/psql": "/opt/homebrew/Cellar/postgresql@15/15.19/bin/psql",
-			"/opt/homebrew/bin/git":  "/opt/homebrew/Cellar/git/2.45.2/bin/git",
-		},
+func TestServiceUsesTheResolvedPackageID(t *testing.T) {
+	// "brew services start postgresql" fails when postgresql@15 is what is
+	// installed, so the resolved identifier has to be what runs.
+	item := brewService("PostgreSQL", detector.StatusStopped, "postgresql@15")
+
+	lines := Drain(NewStart(platform.Darwin).Run(context.Background(), item))
+	if !strings.Contains(strings.Join(lines, "\n"), "postgresql@15") {
+		t.Errorf("command did not use the resolved formula: %v", lines)
 	}
 }
 
-func TestUpgradeOnlyForHomebrewInstalls(t *testing.T) {
-	upgrade := NewUpgrade(brewProbe())
+func TestLinuxServicesUseSystemd(t *testing.T) {
+	// A distribution package has no service template of its own, so systemd
+	// is what drives it.
+	item := owned("PostgreSQL", detector.CategoryServer, detector.StatusStopped, platform.APT, "postgresql")
 
-	brewed := detector.Item{Name: "Git", Status: detector.StatusInstalled, Path: "/opt/homebrew/bin/git"}
-	if !upgrade.Applicable(brewed) {
-		t.Error("Upgrade should apply to a Homebrew install")
+	start := NewStart(platform.Linux)
+	if !start.Applicable(item) {
+		t.Fatal("Start should apply to an APT-installed service on Linux")
 	}
 
-	// Upgrading a pyenv-managed Python through brew would fight the tool that
-	// actually manages it.
-	managed := detector.Item{Name: "Python", Status: detector.StatusInstalled, Path: "/Users/x/.pyenv/shims/python3"}
-	if upgrade.Applicable(managed) {
-		t.Error("Upgrade should not apply outside the Homebrew prefix")
+	lines := Drain(start.Run(context.Background(), item))
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "systemctl") {
+		t.Errorf("Linux service action did not use systemctl: %v", lines)
 	}
-
-	absent := detector.Item{Name: "Rust", Status: detector.StatusNotFound}
-	if upgrade.Applicable(absent) {
-		t.Error("Upgrade should not apply to something that is not installed")
-	}
-}
-
-func TestFormulaComesFromTheCellarPathNotTheBinaryName(t *testing.T) {
-	// The whole point: psql belongs to postgresql@15. Guessing from the
-	// command name would target the wrong formula.
-	p := brewProbe()
-	item := detector.Item{Name: "PostgreSQL", Status: detector.StatusRunning, Path: "/opt/homebrew/bin/psql"}
-
-	if got := formula(p, item); got != "postgresql@15" {
-		t.Errorf("formula() = %q, want postgresql@15", got)
+	// --user needs no elevation; devenv cannot answer a sudo prompt.
+	if !strings.Contains(joined, "--user") {
+		t.Errorf("Linux service action did not stay in the user session: %v", lines)
 	}
 }
 
-func TestFormulaFromPath(t *testing.T) {
+func TestWindowsOffersNoServiceControl(t *testing.T) {
+	// Service control on Windows requires elevation, so it is not attempted.
+	item := owned("PostgreSQL", detector.CategoryServer, detector.StatusStopped, platform.Scoop, "postgresql")
+
+	if NewStart(platform.Windows).Applicable(item) {
+		t.Error("Start was offered on Windows, where devenv cannot elevate")
+	}
+}
+
+func TestUpgradeAndUninstallFollowTheOwningManager(t *testing.T) {
 	tests := []struct {
-		path string
-		want string
+		manager string
+		pkg     string
+		want    bool
+		reason  string
 	}{
-		{"/opt/homebrew/Cellar/postgresql@15/15.19/bin/psql", "postgresql@15"},
-		{"/usr/local/Cellar/redis/7.2.4/bin/redis-server", "redis"},
-		{"/opt/homebrew/opt/node@20/bin/node", "node@20"},
-		{"/usr/bin/git", ""},
-		{"", ""},
+		{platform.Homebrew, "git", true, "Homebrew needs no elevation"},
+		{platform.Scoop, "git", true, "Scoop installs per-user"},
+		{platform.APT, "git", false, "APT needs a sudo password devenv cannot supply"},
+		{platform.DNF, "git", false, "DNF needs elevation"},
+		{platform.Pacman, "git", false, "pacman needs elevation"},
+		{platform.NVM, "22.13.1", false, "nvm has its own uninstall"},
+		{platform.Pyenv, "3.12.4", false, "pyenv has its own uninstall"},
+		{platform.System, "ruby", false, "system installs must never be removed"},
+		{platform.Manual, "/usr/local/go", false, "a manual install is the user's to remove"},
 	}
 
+	uninstall := NewUninstall()
 	for _, tt := range tests {
-		if got := formulaFromPath(tt.path); got != tt.want {
-			t.Errorf("formulaFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+		item := owned("Thing", detector.CategoryTool, detector.StatusInstalled, tt.manager, tt.pkg)
+		if got := uninstall.Applicable(item); got != tt.want {
+			t.Errorf("Uninstall.Applicable(%s) = %v, want %v — %s", tt.manager, got, tt.want, tt.reason)
 		}
 	}
 }
 
-func TestFormulaIsEmptyOutsideHomebrew(t *testing.T) {
-	// An unknown formula must produce nothing to run, never a guess.
-	item := detector.Item{Name: "Python", Status: detector.StatusInstalled, Path: "/Users/x/.pyenv/shims/python3"}
+func TestSystemInstallsAreProtected(t *testing.T) {
+	// /usr/bin/ruby belongs to macOS. Removing it breaks other software, so
+	// no action may offer to.
+	ruby := owned("Ruby", detector.CategoryLanguage, detector.StatusInstalled, platform.System, "ruby")
 
-	if got := formula(brewProbe(), item); got != "" {
-		t.Errorf("formula() = %q, want empty for a non-Homebrew path", got)
+	for _, a := range RegistryFor(platform.Darwin).For(ruby) {
+		t.Errorf("%q was offered for a system install", a.Label())
 	}
 }
 
-func TestServiceActionUsesTheVersionedFormula(t *testing.T) {
-	// "brew services start postgresql" fails when postgresql@15 is what is
-	// installed, so the resolved formula has to win over the name.
-	p := brewProbe()
-	item := detector.Item{Name: "PostgreSQL", Status: detector.StatusStopped, Path: "/opt/homebrew/bin/psql"}
+func TestUnresolvedItemsOfferNothing(t *testing.T) {
+	// Nothing resolved means nothing is safe to run.
+	item := detector.Item{Name: "Mystery", Status: detector.StatusInstalled}
 
-	lines := Drain(NewBrewStart(p).Run(context.Background(), item))
-	joined := strings.Join(lines, "\n")
-
-	if !strings.Contains(joined, "postgresql@15") {
-		t.Errorf("command did not use the versioned formula:\n%s", joined)
+	for _, a := range RegistryFor(platform.Darwin).For(item) {
+		t.Errorf("%q was offered for an item with no known owner", a.Label())
 	}
 }
 
-func TestServiceActionFallsBackToTheKnownFormula(t *testing.T) {
-	// Nothing resolves, but Redis is a service we know by name.
-	p := &probe.Fake{Paths: map[string]string{"brew": "/opt/homebrew/bin/brew"}}
-	item := detector.Item{Name: "Redis", Status: detector.StatusStopped, Path: "/usr/bin/redis-server"}
+func TestGuidanceExplainsWhatDevenvWillNotDo(t *testing.T) {
+	tests := []struct {
+		manager string
+		pkg     string
+		want    string
+	}{
+		{platform.NVM, "22.13.1", "nvm uninstall 22.13.1"},
+		{platform.Pyenv, "3.12.4", "pyenv uninstall 3.12.4"},
+		{platform.APT, "golang", "sudo apt-get remove golang"},
+		{platform.System, "ruby", "operating system"},
+		{platform.Manual, "/usr/local/go", "/usr/local/go"},
+	}
 
-	lines := Drain(NewBrewStart(p).Run(context.Background(), item))
-	if !strings.Contains(strings.Join(lines, "\n"), "redis") {
-		t.Errorf("fallback formula was not used: %v", lines)
+	for _, tt := range tests {
+		item := owned("Thing", detector.CategoryLanguage, detector.StatusInstalled, tt.manager, tt.pkg)
+		got := Guidance(item)
+		if !strings.Contains(got, tt.want) {
+			t.Errorf("Guidance(%s) = %q, want it to mention %q", tt.manager, got, tt.want)
+		}
 	}
 }
 
-func TestUninstallOnlyOffersItselfWhenTheFormulaIsKnown(t *testing.T) {
-	uninstall := NewUninstall(brewProbe())
-
-	known := detector.Item{Name: "Git", Status: detector.StatusInstalled, Path: "/opt/homebrew/bin/git"}
-	if !uninstall.Applicable(known) {
-		t.Error("Uninstall should apply to a Homebrew install with a known formula")
-	}
-
-	// Inside the prefix, but nothing resolves to a Cellar path: offering an
-	// action that cannot name its target would be worse than not offering it.
-	unknown := detector.Item{Name: "Mystery", Status: detector.StatusInstalled, Path: "/opt/homebrew/bin/mystery"}
-	if uninstall.Applicable(unknown) {
-		t.Error("Uninstall was offered for an item whose formula is unknown")
-	}
-
-	outside := detector.Item{Name: "Node.js", Status: detector.StatusInstalled, Path: "/Users/x/.nvm/versions/node/v22/bin/node"}
-	if uninstall.Applicable(outside) {
-		t.Error("Uninstall was offered for an nvm-managed install")
+func TestHomebrewItemsNeedNoGuidance(t *testing.T) {
+	// devenv can act on these itself, so there is nothing to explain.
+	item := owned("Git", detector.CategoryTool, detector.StatusInstalled, platform.Homebrew, "git")
+	if got := Guidance(item); got != "" {
+		t.Errorf("Guidance() = %q, want empty for something devenv can act on", got)
 	}
 }
 
 func TestUninstallIsDestructiveAndNamesTheCommand(t *testing.T) {
-	var a Action = NewUninstall(brewProbe())
+	var a Action = NewUninstall()
 
 	d, ok := a.(Destructive)
 	if !ok {
 		t.Fatal("Uninstall does not implement Destructive, so the UI would run it without asking")
 	}
 
-	item := detector.Item{Name: "PostgreSQL", Status: detector.StatusRunning, Path: "/opt/homebrew/bin/psql"}
-	confirm := d.Confirm(item)
-
-	// The confirmation has to name the formula: "Uninstall PostgreSQL" would
-	// not tell the user that postgresql@15 is what goes.
-	if !strings.Contains(confirm, "postgresql@15") {
-		t.Errorf("Confirm() = %q, want the formula named", confirm)
+	confirm := d.Confirm(brewService("PostgreSQL", detector.StatusRunning, "postgresql@15"))
+	if !strings.Contains(confirm, "brew uninstall postgresql@15") {
+		t.Errorf("Confirm() = %q, want the exact command", confirm)
 	}
 	if !strings.Contains(confirm, "data") {
 		t.Errorf("Confirm() = %q, want the data warning for a service", confirm)
@@ -180,55 +184,44 @@ func TestUninstallIsDestructiveAndNamesTheCommand(t *testing.T) {
 
 func TestUpgradeIsNotDestructive(t *testing.T) {
 	// Only genuinely irreversible actions should cost a second keypress.
-	var a Action = NewUpgrade(brewProbe())
+	var a Action = NewUpgrade()
 	if _, ok := a.(Destructive); ok {
 		t.Error("Upgrade is marked Destructive")
 	}
 }
 
-func TestUninstallRefusesWithoutAFormula(t *testing.T) {
-	item := detector.Item{Name: "Mystery", Status: detector.StatusInstalled, Path: "/opt/homebrew/bin/mystery"}
+func TestRefusalNamesTheRightCommand(t *testing.T) {
+	// The answer to "why is there no uninstall button".
+	node := owned("Node.js", detector.CategoryLanguage, detector.StatusInstalled, platform.NVM, "22.13.1")
 
-	lines := Drain(NewUninstall(brewProbe()).Run(context.Background(), item))
-	if len(lines) != 1 || !strings.HasPrefix(lines[0], "✗") {
-		t.Errorf("lines = %v, want a single refusal", lines)
+	lines := Drain(NewUninstall().Run(context.Background(), node))
+	if len(lines) != 1 {
+		t.Fatalf("lines = %v, want a single refusal", lines)
 	}
-}
-
-func TestIsBrewPath(t *testing.T) {
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{"/opt/homebrew/bin/git", true},
-		{"/usr/local/Cellar/redis/7.2.4/bin/redis-server", true},
-		{"/home/linuxbrew/.linuxbrew/bin/gh", true},
-		{"/usr/bin/git", false},
-		{"/Users/x/.cargo/bin/rustc", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		if got := IsBrewPath(tt.path); got != tt.want {
-			t.Errorf("IsBrewPath(%q) = %v, want %v", tt.path, got, tt.want)
-		}
+	if !strings.Contains(lines[0], "nvm uninstall 22.13.1") {
+		t.Errorf("refusal = %q, want the nvm command named", lines[0])
 	}
 }
 
 func TestRegistryFiltersByApplicability(t *testing.T) {
-	r := NewRegistry()
-	r.Register(NewBrewStart(brewProbe()), NewBrewStop(brewProbe()), NewUpgrade(brewProbe()))
+	r := RegistryFor(platform.Darwin)
 
-	stopped := service("Redis", detector.StatusStopped)
+	stopped := brewService("Redis", detector.StatusStopped, "redis")
 	labels := r.Labels(stopped)
-
-	if len(labels) != 1 || labels[0] != "Start" {
-		t.Errorf("Labels(stopped redis) = %v, want [Start]", labels)
+	if len(labels) == 0 || labels[0] != "Start" {
+		t.Errorf("Labels(stopped) = %v, want Start first", labels)
+	}
+	for _, l := range labels {
+		if l == "Stop" {
+			t.Error("Stop was offered for a stopped service")
+		}
 	}
 
-	running := service("Redis", detector.StatusRunning)
-	if got := r.Labels(running); len(got) != 1 || got[0] != "Stop" {
-		t.Errorf("Labels(running redis) = %v, want [Stop]", got)
+	running := brewService("Redis", detector.StatusRunning, "redis")
+	for _, l := range r.Labels(running) {
+		if l == "Start" {
+			t.Error("Start was offered for a running service")
+		}
 	}
 }
 
@@ -241,37 +234,11 @@ func TestRegistryIgnoresNil(t *testing.T) {
 	}
 }
 
-func TestDefaultRegistrySkipsBrewActionsWithoutBrew(t *testing.T) {
-	// Offering "Start" on a machine with no brew would produce an action that
-	// can only ever fail.
-	r := DefaultRegistry(&probe.Fake{})
-
-	for _, a := range r.For(service("Redis", detector.StatusStopped)) {
-		if a.Label() == "Start" {
-			t.Error("Start was registered with no Homebrew installed")
-		}
-	}
-}
-
-func TestDefaultRegistryIncludesBrewActionsWhenPresent(t *testing.T) {
-	p := &probe.Fake{Paths: map[string]string{"brew": "/opt/homebrew/bin/brew"}}
-	r := DefaultRegistry(p)
-
-	labels := r.Labels(service("Redis", detector.StatusStopped))
-	if len(labels) == 0 {
-		t.Fatal("no actions offered for a stopped Redis with brew installed")
-	}
-	if labels[0] != "Start" {
-		t.Errorf("Labels() = %v, want Start first", labels)
-	}
-}
-
 func TestRunStreamsOutputAndClosesTheChannel(t *testing.T) {
-	// A real command, so the streaming path itself is exercised.
 	lines := Drain(run(context.Background(), "done", "sh", "-c", "echo first; echo second"))
 
 	if len(lines) < 3 {
-		t.Fatalf("got %d lines, want the command echo plus two output lines and a result: %v", len(lines), lines)
+		t.Fatalf("got %d lines, want the command echo plus output and a result: %v", len(lines), lines)
 	}
 	if !strings.HasPrefix(lines[0], "$ sh") {
 		t.Errorf("first line = %q, want the command that ran", lines[0])
@@ -288,7 +255,6 @@ func TestRunReportsFailure(t *testing.T) {
 	if !strings.HasPrefix(last, "✗") {
 		t.Errorf("last line = %q, want a failure marker", last)
 	}
-	// stderr is merged in, so the reason is visible above the marker.
 	if !strings.Contains(strings.Join(lines, "\n"), "problem") {
 		t.Errorf("stderr was not streamed: %v", lines)
 	}
@@ -314,14 +280,6 @@ func TestRunStopsOnCancellation(t *testing.T) {
 	}
 }
 
-func TestUnmanagedServiceFailsCleanly(t *testing.T) {
-	lines := Drain(NewBrewStart(brewProbe()).Run(context.Background(), detector.Item{Name: "Nothing"}))
-
-	if len(lines) != 1 || !strings.HasPrefix(lines[0], "✗") {
-		t.Errorf("lines = %v, want a single failure line", lines)
-	}
-}
-
 func TestLongLinesAreNotTruncated(t *testing.T) {
 	// A download progress bar redraws with carriage returns, so it reaches us
 	// as one line far past bufio's 64KB default.
@@ -344,8 +302,6 @@ func TestLongLinesAreNotTruncated(t *testing.T) {
 }
 
 func TestAnUnreadableStreamIsReportedNotSilentlyTruncated(t *testing.T) {
-	// Past the cap the read fails. Reporting success over truncated output
-	// would be worse than reporting the failure.
 	lines := Drain(run(context.Background(), "done", "sh", "-c",
 		fmt.Sprintf("printf '%%0.sx' $(seq 1 %d); echo", maxScanLine+1024)))
 

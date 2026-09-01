@@ -96,8 +96,15 @@ type Item struct {
 	Status      Status            `json:"status"`
 	Meta        map[string]string `json:"meta,omitempty"` // tool-specific extras (model list, port, etc.)
 	UpdateAvail bool              `json:"updateAvail"`    // reserved for Phase 3
-	DetectedAt  time.Time         `json:"detectedAt"`
-	Actions     []string          `json:"actions,omitempty"` // reserved for Phase 2
+	// ManagedBy names the tool responsible for this install — "Homebrew",
+	// "nvm", "system". It decides which actions are possible, and what to
+	// tell the user when none are.
+	ManagedBy string `json:"managedBy,omitempty"`
+	// PackageID is what ManagedBy knows this by: a Homebrew formula, an nvm
+	// version, a distribution package name.
+	PackageID  string    `json:"packageId,omitempty"`
+	DetectedAt time.Time `json:"detectedAt"`
+	Actions    []string  `json:"actions,omitempty"` // reserved for Phase 2
 }
 
 // WithMeta returns a copy of the item with one meta key set. Empty values are
@@ -124,6 +131,14 @@ type Detector interface {
 	Name() string
 	Category() Category
 	Detect(ctx context.Context) (Item, error)
+}
+
+// Resolver enriches a detected item with facts the detector itself does not
+// know — chiefly which tool owns the install. The engine applies it once per
+// scan, so every later question is answered from the stored item rather than
+// by probing the machine again.
+type Resolver interface {
+	Resolve(ctx context.Context, item Item) Item
 }
 
 // Sink receives detection results. The store implements it; declaring it here

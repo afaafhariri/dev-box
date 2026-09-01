@@ -17,6 +17,7 @@ type keyMap struct {
 	Back    key.Binding
 	Rescan  key.Binding
 	Hidden  key.Binding
+	Search  key.Binding
 	Quit    key.Binding
 }
 
@@ -35,6 +36,7 @@ func newKeyMap() keyMap {
 		Back:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		Rescan:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rescan")),
 		Hidden:  key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "toggle missing")),
+		Search:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 		// Esc is the detail view's back key, so it cannot also quit.
 		Quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}

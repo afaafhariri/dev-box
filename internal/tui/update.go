@@ -48,6 +48,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case refreshTickMsg:
+		// Rearm regardless: a tick that lands mid-scan is queued rather than
+		// dropped, and the timer must keep running either way.
+		return m, tea.Batch(m.startScan(), m.refreshCmd())
+
 	case subClosedMsg:
 		// Store closed on shutdown: stop listening, leave the last state up.
 		return m, nil
@@ -71,6 +76,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Search takes the keyboard while it has focus, so letters typed into it
+	// are not read as commands.
+	if m.searching {
+		return m.handleSearchKey(msg)
+	}
+
 	// Quit works everywhere, including mid-action: the context cancels the
 	// subprocess on the way out.
 	if key.Matches(msg, m.keys.Quit) {
@@ -122,6 +133,55 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Rescan):
 		return m, m.startScan()
+
+	case key.Matches(msg, m.keys.Search):
+		m.searching = true
+
+	case key.Matches(msg, m.keys.Back):
+		// Esc clears a filter left standing after search mode was exited.
+		if m.query != "" {
+			m.query = ""
+			m.refresh()
+		}
+	}
+
+	return m, nil
+}
+
+// handleSearchKey routes typing into the filter. Only Esc and Enter leave.
+func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Esc abandons the search entirely, restoring the full list.
+		m.searching = false
+		m.query = ""
+		m.refresh()
+		return m, nil
+
+	case tea.KeyEnter:
+		// Enter keeps the filter and hands the keyboard back, so the results
+		// can be navigated.
+		m.searching = false
+		return m, nil
+
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+
+	case tea.KeyBackspace:
+		if m.query != "" {
+			runes := []rune(m.query)
+			m.query = string(runes[:len(runes)-1])
+			m.refresh()
+		}
+		return m, nil
+
+	case tea.KeyRunes, tea.KeySpace:
+		m.query += string(msg.Runes)
+		if msg.Type == tea.KeySpace {
+			m.query += " "
+		}
+		m.refresh()
+		return m, nil
 	}
 
 	return m, nil

@@ -61,3 +61,21 @@ func TestLinesSkipsBlanks(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionKeepsPreReleaseButDropsBuildMetadata(t *testing.T) {
+	tests := []struct{ out, want string }{
+		// helm reports its git hash as build metadata; it is not part of the
+		// version anyone means.
+		{"v3.15.2+g1a500d5", "3.15.2"},
+		{"1.2.3+20240601", "1.2.3"},
+		// A pre-release does change which version this is.
+		{"1.2.3-rc.1", "1.2.3-rc.1"},
+		{"2.0.0-beta", "2.0.0-beta"},
+	}
+
+	for _, tt := range tests {
+		if got := Version(tt.out); got != tt.want {
+			t.Errorf("Version(%q) = %q, want %q", tt.out, got, tt.want)
+		}
+	}
+}

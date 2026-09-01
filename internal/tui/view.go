@@ -14,7 +14,12 @@ func (m Model) View() string {
 	b.WriteString(m.header())
 	b.WriteString("\n")
 	b.WriteString(m.tabBar())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if line := m.searchLine(); line != "" {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	if m.page == PageDetail {
 		b.WriteString(m.detail.View())
@@ -48,10 +53,21 @@ func (m Model) scanState() string {
 		return fmt.Sprintf("%s scanning %d/%d", m.spin.View(), len(m.seen), m.scanner.Len())
 	}
 
-	return fmt.Sprintf("%d of %d found · %s in %s",
+	state := fmt.Sprintf("%d of %d found · %s in %s",
 		m.store.Found(), m.store.Len(),
 		m.lastScan.Format("15:04:05"), roundDuration(m.elapsed),
 	)
+	if n := m.outdatedCount(); n > 0 {
+		state += fmt.Sprintf(" · %d update%s", n, plural(n))
+	}
+	return state
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // tabBar renders the page tabs.
@@ -70,6 +86,20 @@ func (m Model) tabBar() string {
 	return " " + strings.Join(parts, m.styles.TabBar("·"))
 }
 
+// searchLine renders the filter input, or the standing filter when the input
+// no longer has focus. It renders nothing when there is neither.
+func (m Model) searchLine() string {
+	switch {
+	case m.searching:
+		return m.styles.Badge.Render("  /" + m.query + "▌")
+	case m.query != "":
+		return m.styles.Meta.Render(fmt.Sprintf("  filter: %s  (%d shown, esc to clear)",
+			m.query, m.list().Len()))
+	default:
+		return ""
+	}
+}
+
 // help is the key hint line, which changes with the active page.
 func (m Model) help() string {
 	if m.page == PageDetail {
@@ -83,7 +113,11 @@ func (m Model) help() string {
 		return m.styles.Help.Render("  " + strings.Join(hints, " · "))
 	}
 
-	hints := []string{"↑/↓ move", "tab page", "enter detail", "r rescan"}
+	if m.searching {
+		return m.styles.Help.Render("  type to filter · enter to keep · esc to clear")
+	}
+
+	hints := []string{"↑/↓ move", "tab page", "enter detail", "/ search", "r rescan"}
 	if m.showMissing {
 		hints = append(hints, "a hide missing")
 	} else if missing := m.missingCount(); missing > 0 {

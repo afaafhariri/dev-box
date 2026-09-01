@@ -10,7 +10,7 @@ import (
 
 	"devenv/internal/action"
 	"devenv/internal/detector"
-	"devenv/internal/probe"
+	"devenv/internal/platform"
 	"devenv/internal/store"
 )
 
@@ -20,10 +20,14 @@ type stubScanner struct{ n, runs int }
 func (s *stubScanner) RunAll(context.Context) { s.runs++ }
 func (s *stubScanner) Len() int               { return s.n }
 
+// item is an item as a scan leaves it: ownership already resolved, which is
+// what decides the actions offered for it.
 func item(name string, cat detector.Category, status detector.Status) detector.Item {
 	return detector.Item{
 		Name: name, Category: cat, Status: status,
-		Version: "1.0.0", Path: "/opt/homebrew/bin/" + strings.ToLower(name),
+		Version:   "1.0.0",
+		Path:      "/opt/homebrew/bin/" + strings.ToLower(name),
+		ManagedBy: platform.Homebrew, PackageID: strings.ToLower(name),
 	}
 }
 
@@ -50,12 +54,9 @@ func newTestModel(t *testing.T, items ...detector.Item) (Model, *store.Store) {
 		st.Set(it)
 	}
 
-	// Homebrew present, so the service actions are registered.
-	actions := action.DefaultRegistry(&probe.Fake{
-		Paths: map[string]string{"brew": "/opt/homebrew/bin/brew"},
-	})
+	actions := action.RegistryFor(platform.Darwin)
 
-	m := New(context.Background(), st, &stubScanner{n: len(items)}, actions)
+	m := New(context.Background(), st, &stubScanner{n: len(items)}, actions, 0)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	return next.(Model), st
 }
@@ -210,7 +211,7 @@ func TestDetailOfAPlainToolOffersNoServiceActions(t *testing.T) {
 }
 
 func TestRunningAnActionStreamsOutput(t *testing.T) {
-	m, _ := newTestModel(t, item("Redis", detector.CategoryServer, detector.StatusStopped))
+	m, _ := newTestModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
 
 	// Let the opening scan finish, so the rescan below is not merely queued.
 	next0, _ := m.Update(scanCompleteMsg{Elapsed: time.Millisecond})
@@ -280,7 +281,7 @@ func TestARescanRequestedMidScanIsHonouredLater(t *testing.T) {
 }
 
 func TestASecondActionCannotStartWhileOneRuns(t *testing.T) {
-	m, _ := newTestModel(t, item("Redis", detector.CategoryServer, detector.StatusStopped))
+	m, _ := newTestModel(t, brewItem("Redis", detector.CategoryServer, detector.StatusStopped))
 
 	m = press(m, "enter")
 	m = press(m, "enter") // starts the action
@@ -295,13 +296,10 @@ func TestASecondActionCannotStartWhileOneRuns(t *testing.T) {
 	}
 }
 
-// brewItem is installed under a Homebrew prefix whose symlink resolves to a
-// Cellar path, so the destructive actions apply to it.
+// brewItem is item under its older name, kept for the destructive-action
+// tests that read better spelling out what they rely on.
 func brewItem(name string, cat detector.Category, status detector.Status) detector.Item {
-	return detector.Item{
-		Name: name, Category: cat, Status: status, Version: "1.0.0",
-		Path: "/opt/homebrew/bin/" + strings.ToLower(name),
-	}
+	return item(name, cat, status)
 }
 
 // destructiveModel wires a probe whose symlinks resolve into the Cellar.
@@ -314,17 +312,9 @@ func destructiveModel(t *testing.T, items ...detector.Item) Model {
 		st.Set(it)
 	}
 
-	links := make(map[string]string, len(items))
-	for _, it := range items {
-		links[it.Path] = "/opt/homebrew/Cellar/" + strings.ToLower(it.Name) + "/1.0.0/bin/" + strings.ToLower(it.Name)
-	}
+	actions := action.RegistryFor(platform.Darwin)
 
-	actions := action.DefaultRegistry(&probe.Fake{
-		Paths: map[string]string{"brew": "/opt/homebrew/bin/brew"},
-		Links: links,
-	})
-
-	m := New(context.Background(), st, &stubScanner{n: len(items)}, actions)
+	m := New(context.Background(), st, &stubScanner{n: len(items)}, actions, 0)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	next, _ = next.(Model).Update(scanCompleteMsg{Elapsed: time.Millisecond})
 	return next.(Model)
@@ -454,6 +444,59 @@ func TestNonDestructiveActionsRunImmediately(t *testing.T) {
 	}
 }
 
+func TestDetailExplainsWhyThereAreNoActions(t *testing.T) {
+	// "No actions available" on its own sends people to the source to work
+	// out why. An nvm-managed Node has a real answer, and this is where it
+	// belongs.
+	node := detector.Item{
+		Name: "Node.js", Category: detector.CategoryLanguage, Status: detector.StatusInstalled,
+		Version: "22.13.1", Path: "/Users/x/.nvm/versions/node/v22.13.1/bin/node",
+		ManagedBy: platform.NVM, PackageID: "22.13.1",
+	}
+
+	m, _ := newTestModel(t, node)
+	m = press(m, "enter")
+	view := m.View()
+
+	if !strings.Contains(view, "nvm") {
+		t.Errorf("detail view does not name the owner:\n%s", view)
+	}
+	if !strings.Contains(view, "nvm uninstall 22.13.1") {
+		t.Errorf("detail view does not say what to run instead:\n%s", view)
+	}
+	if strings.Contains(view, "no actions available for this item") {
+		t.Error("fell back to the unexplained message despite knowing the owner")
+	}
+}
+
+func TestDetailShowsTheOwnerOfEveryInstall(t *testing.T) {
+	m, _ := newTestModel(t, item("Git", detector.CategoryTool, detector.StatusInstalled))
+	m = press(m, "enter")
+
+	if !strings.Contains(m.View(), "managed by") {
+		t.Error("detail view does not show who manages the install")
+	}
+}
+
+func TestSystemInstallsOfferNoActionsButExplainWhy(t *testing.T) {
+	ruby := detector.Item{
+		Name: "Ruby", Category: detector.CategoryLanguage, Status: detector.StatusInstalled,
+		Version: "2.6.10", Path: "/usr/bin/ruby",
+		ManagedBy: platform.System, PackageID: "ruby",
+	}
+
+	m, _ := newTestModel(t, ruby)
+	m = press(m, "enter")
+	view := m.View()
+
+	if strings.Contains(view, "Uninstall") {
+		t.Error("Uninstall was offered for a system install")
+	}
+	if !strings.Contains(view, "operating system") {
+		t.Errorf("no explanation for a protected install:\n%s", view)
+	}
+}
+
 func TestMissingItemsAreHiddenUntilToggled(t *testing.T) {
 	m, _ := newTestModel(t, sampleItems()...)
 
@@ -534,7 +577,7 @@ func TestCachedStateIsAnnouncedUntilTheScanLands(t *testing.T) {
 		Items:    []detector.Item{item("Go", detector.CategoryLanguage, detector.StatusInstalled)},
 	})
 
-	m := New(context.Background(), st, &stubScanner{n: 1}, action.NewRegistry())
+	m := New(context.Background(), st, &stubScanner{n: 1}, action.NewRegistry(), 0)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = next.(Model)
 
@@ -547,6 +590,115 @@ func TestCachedStateIsAnnouncedUntilTheScanLands(t *testing.T) {
 	next, _ = m.Update(scanCompleteMsg{Elapsed: time.Second})
 	if strings.Contains(next.(Model).View(), "cached") {
 		t.Error("the cache notice survived a completed scan")
+	}
+}
+
+func TestSearchFiltersEveryPage(t *testing.T) {
+	m, _ := newTestModel(t, sampleItems()...)
+
+	m = press(m, "/")
+	if !m.searching {
+		t.Fatal("'/' did not enter search mode")
+	}
+
+	for _, r := range "redis" {
+		m = press(m, string(r))
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "Redis") {
+		t.Error("the matching item was filtered out")
+	}
+	if strings.Contains(view, "Ollama") {
+		t.Error("a non-matching item survived the filter")
+	}
+
+	// Enter keeps the filter and hands the keyboard back.
+	m = press(m, "enter")
+	if m.searching {
+		t.Error("enter did not leave search mode")
+	}
+	if m.query != "redis" {
+		t.Errorf("query = %q, want it kept after leaving search mode", m.query)
+	}
+	if !strings.Contains(m.View(), "filter: redis") {
+		t.Error("the standing filter is not shown once the input loses focus")
+	}
+}
+
+func TestLettersTypedIntoSearchAreNotCommands(t *testing.T) {
+	m, _ := newTestModel(t, sampleItems()...)
+	m = press(m, "/")
+
+	// "a" toggles missing items and "r" rescans outside search mode; inside
+	// it they are just letters.
+	before := m.showMissing
+	m = press(m, "a")
+	m = press(m, "r")
+
+	if m.showMissing != before {
+		t.Error("typing 'a' into the search box toggled the missing filter")
+	}
+	if m.query != "ar" {
+		t.Errorf("query = %q, want the letters to have been typed", m.query)
+	}
+}
+
+func TestBackspaceAndEscapeInSearch(t *testing.T) {
+	m, _ := newTestModel(t, sampleItems()...)
+	m = press(m, "/")
+	for _, r := range "redis" {
+		m = press(m, string(r))
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = next.(Model)
+	if m.query != "redi" {
+		t.Errorf("query = %q after backspace, want redi", m.query)
+	}
+
+	m = press(m, "esc")
+	if m.searching || m.query != "" {
+		t.Errorf("esc left searching=%v query=%q, want both cleared", m.searching, m.query)
+	}
+	if !strings.Contains(m.View(), "Ollama") {
+		t.Error("clearing the search did not restore the full list")
+	}
+}
+
+func TestEscapeClearsAStandingFilter(t *testing.T) {
+	m, _ := newTestModel(t, sampleItems()...)
+	m = press(m, "/")
+	m = press(m, "r")
+	m = press(m, "enter") // keep the filter, leave the input
+
+	m = press(m, "esc")
+	if m.query != "" {
+		t.Errorf("query = %q, want esc to clear a standing filter", m.query)
+	}
+}
+
+func TestBackgroundRefreshRearmsItself(t *testing.T) {
+	m, _ := newTestModel(t, sampleItems()...)
+	next, _ := m.Update(scanCompleteMsg{Elapsed: time.Millisecond})
+	m = next.(Model)
+	m.refreshEvery = time.Minute
+
+	next, cmd := m.Update(refreshTickMsg{})
+	m = next.(Model)
+
+	if cmd == nil {
+		t.Fatal("the refresh tick produced no work")
+	}
+	if !m.scanning {
+		t.Error("the refresh tick did not start a scan")
+	}
+}
+
+func TestRefreshIsOffByDefault(t *testing.T) {
+	m, _ := newTestModel(t, sampleItems()...)
+	if cmd := m.refreshCmd(); cmd != nil {
+		t.Error("background refresh scheduled itself without being asked for")
 	}
 }
 

@@ -166,8 +166,21 @@ func (d *Detail) fields() []field {
 	fields := []field{
 		{"category", d.item.Category.Title()},
 	}
+	// Who owns the install decides what can be done to it, so it sits with
+	// the other headline facts rather than among the tool-specific metadata.
+	if d.item.ManagedBy != "" {
+		managed := d.item.ManagedBy
+		if d.item.PackageID != "" {
+			managed += "  (" + d.item.PackageID + ")"
+		}
+		fields = append(fields, field{"managed by", managed})
+	}
 	if d.item.Version != "" {
-		fields = append(fields, field{"version", d.item.Version})
+		version := d.item.Version
+		if d.item.UpdateAvail {
+			version += "   (update available)"
+		}
+		fields = append(fields, field{"version", version})
 	}
 	if d.item.Path != "" {
 		fields = append(fields, field{"path", d.item.Path})
@@ -188,8 +201,15 @@ func (d *Detail) fields() []field {
 }
 
 // actionBar renders the available actions, or why there are none.
+//
+// "No actions available" on its own is the kind of dead end that sends people
+// to the source to work out why, so when devenv will not act it says who does
+// own the install and what to run instead.
 func (d *Detail) actionBar() string {
 	if len(d.actions) == 0 {
+		if guidance := action.Guidance(d.item); guidance != "" {
+			return d.styles.Meta.Render("  " + guidance)
+		}
 		return d.styles.Meta.Render("  no actions available for this item")
 	}
 
