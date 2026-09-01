@@ -72,11 +72,53 @@ Go 1.25 or newer. Builds and runs on macOS, Linux, and Windows.
 What differs per platform is what devenv will *do* for you, not what it can
 see — see [Ownership](#ownership) below.
 
-## Build and run
+## Install
+
+```sh
+go install .
+```
+
+That builds `devenv` into `$(go env GOPATH)/bin` — usually `~/go/bin`.
+
+**That directory is often not on your `PATH`.** Installing Go adds the
+toolchain (`/usr/local/go/bin`, so `go` itself works) but not the directory
+`go install` writes to, which is why a fresh install ends in
+`command not found`. Check:
+
+```sh
+case ":$PATH:" in *":$(go env GOPATH)/bin:"*) echo on PATH;; *) echo MISSING;; esac
+```
+
+If it is missing, add it — `~/.zshrc` for zsh, `~/.bashrc` for bash:
+
+```sh
+echo 'export PATH="$(go env GOPATH)/bin:$PATH"' >> ~/.zshrc
+```
+
+Then open a new shell, or `source ~/.zshrc`. On Windows the equivalent
+directory is `%USERPROFILE%\go\bin`.
+
+Already had a shell open when the binary first appeared? zsh caches what it
+finds on `PATH`, so run `rehash` — but only once the directory is genuinely on
+`PATH`, since that cache is not what causes `command not found` on a first
+install.
+
+## Run from the source tree
+
+No install needed:
 
 ```sh
 go run .                # start the TUI
-go build -o devenv .    # build a binary
+go build -o devenv .    # build a binary in the current directory
+./devenv
+```
+
+### Versioning a build
+
+`Version` is set at link time, so an ordinary build reports `dev`:
+
+```sh
+go install -ldflags "-X devenv/cmd.Version=v0.1.0" .
 ```
 
 ## Usage
@@ -408,10 +450,54 @@ Two conventions matter:
 ## Testing
 
 ```sh
-go test ./...           # full suite
-go test -race ./...     # the store and engine are concurrent; run this too
+go test ./...
+```
+
+```sh
+go test -race ./...
+```
+
+The store, engine, and action executor are all concurrent, so run the race
+detector before committing rather than only `go test`.
+
+```sh
 go test -cover ./...
 ```
 
+```sh
+go vet ./... && gofmt -l .
+```
+
+`gofmt -l` printing nothing means everything is formatted; anything it lists
+needs `gofmt -w`.
+
 Detector tests script a `probe.Fake` with canned command output, so they are
-fast, hermetic, and identical on every machine.
+fast, hermetic, and identical on every machine. The same fake drives the
+per-platform rules, which is how the Linux and Windows behaviour is tested
+from a Mac.
+
+### Cross-platform checks
+
+The platform-specific code is compiled, not run, on the other targets, so this
+is what catches breakage there:
+
+```sh
+GOOS=linux GOARCH=amd64 go build -o /dev/null ./... && GOOS=windows GOARCH=amd64 go build -o /dev/null ./...
+```
+
+### Seeing the UI without a terminal
+
+The TUI renders to a string, so it can be inspected from a test:
+
+```sh
+go test ./internal/tui/ -run TestRenderSample -v
+```
+
+### Inspecting ownership resolution
+
+Ownership decides which actions appear, so this is the first thing to check
+when an action is missing or wrong:
+
+```sh
+devenv --json --no-cache | jq -r '.items[] | select(.status != "not_found") | "\(.name)\t\(.managedBy)\t\(.packageId)"'
+```
